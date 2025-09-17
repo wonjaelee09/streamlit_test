@@ -1,0 +1,276 @@
+import streamlit as st
+import pandas as pd
+from datetime import datetime
+from snowflake.snowpark.context import get_active_session
+from snowflake.snowpark.functions import col
+
+class SnowflakeTracker:
+    def __init__(self, session):
+        """Initialize with a Snowpark session"""
+        self.session = session
+        self.last_comments_state = {}
+    
+    def track_comment_changes(self, table_name: str, id_column: str = 'id', comment_column: str = 'comments'):
+        """Check for changes in the comments column and logs them."""
+        try:
+            table = self.session.table(table_name)
+            current_comments = table.select(id_column, comment_column).collect()
+            
+            changes = []
+            for row in current_comments:
+                record_id = row[id_column]
+                comment = row[comment_column]
+                
+                if record_id in self.last_comments_state:
+                    if self.last_comments_state[record_id] != comment:
+                        changes.append({
+                            'record_id': record_id,
+                            'old_comment': self.last_comments_state[record_id],
+                            'new_comment': comment,
+                            'timestamp': datetime.now()
+                        })
+                else:
+                    changes.append({
+                        'record_id': record_id,
+                        'old_comment': None,
+                        'new_comment': comment,
+                        'timestamp': datetime.now()
+                    })
+                
+                self.last_comments_state[record_id] = comment
+            
+            return changes
+                
+        except Exception as e:
+            st.error(f'Error tracking comment changes: {e}')
+            return []
+    
+    def get_python_packages(self, table_name: str = 'information_schema.packages'):
+        """Get Python packages from the information schema."""
+        try:
+            dataframe = self.session.table(table_name).filter(col("language") == 'python')
+            result_df = dataframe.to_pandas()
+            return result_df
+        except Exception as e:
+            st.error(f"Error retrieving Python packages: {e}")
+            return pd.DataFrame()
+    
+    def get_table_data(self, table_name: str, limit: int = 100):
+        """Get sample data from any table"""
+        try:
+            dataframe = self.session.table(table_name).limit(limit)
+            return dataframe.to_pandas()
+        except Exception as e:
+            st.error(f"Error retrieving table data: {e}")
+            return pd.DataFrame()
+
+def main():
+    st.set_page_config(
+        page_title="Snowflake Data Explorer",
+        page_icon="❄️",
+        layout="wide"
+    )
+    
+    st.title("❄️ Snowflake Data Explorer & Comment Tracker")
+    st.markdown("*Running natively in Snowflake*")
+    st.markdown("---")
+    
+    # Get the active Snowflake session (automatically available)
+    try:
+        session = get_active_session()
+        st.success("✅ Connected to Snowflake session")
+    except Exception as e:
+        st.error(f"❌ Error getting Snowflake session: {e}")
+        return
+    
+    # Initialize the tracker
+    if 'snowflake_tracker' not in st.session_state:
+        st.session_state.snowflake_tracker = SnowflakeTracker(session)
+    if 'comment_history' not in st.session_state:
+        st.session_state.comment_history = []
+    
+    # Sidebar for current session info
+    with st.sidebar:
+        st.header("📊 Session Info")
+        st.success("🟢 Session Active")
+        
+        # Try to get current database/schema info
+        try:
+            current_db = session.sql("SELECT CURRENT_DATABASE()").collect()[0][0]
+            current_schema = session.sql("SELECT CURRENT_SCHEMA()").collect()[0][0]
+            current_warehouse = session.sql("SELECT CURRENT_WAREHOUSE()").collect()[0][0]
+            
+            st.info(f"**Database:** {current_db}")
+            st.info(f"**Schema:** {current_schema}")
+            st.info(f"**Warehouse:** {current_warehouse}")
+        except:
+            st.info("Session context information unavailable")
+        
+        st.markdown("---")
+        st.markdown("**💡 Tip:** You're running natively in Snowflake - no connection setup needed!")
+    
+    # Tabs for different features
+    tab1, tab2, tab3, tab4 = st.tabs(["📊 Dashboard", "💬 Comment Tracker", "📦 Python Packages", "🔍 Data Explorer"])
+    
+    with tab1:
+        st.header("📊 Dashboard")
+        
+        # Metrics
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Total Comment Changes", len(st.session_state.comment_history))
+        col2.metric("Session Status", "Active in Snowflake")
+        col3.metric("Environment", "Native Streamlit")
+        
+        # Comment changes over time
+        if st.session_state.comment_history:
+            st.subheader("Recent Comment Changes")
+            df_changes = pd.DataFrame(st.session_state.comment_history[-10:])
+            st.dataframe(df_changes, use_container_width=True)
+            
+            # Simple chart using Streamlit's built-in charting
+            if len(st.session_state.comment_history) > 1:
+                df_chart = pd.DataFrame(st.session_state.comment_history)
+                df_chart['timestamp'] = pd.to_datetime(df_chart['timestamp'])
+                df_chart['hour'] = df_chart['timestamp'].dt.floor('H')
+                hourly_changes = df_chart.groupby('hour').size().reset_index(name='changes')
+                st.line_chart(hourly_changes.set_index('hour')['changes'])
+        else:
+            st.info("No comment changes tracked yet. Use the Comment Tracker tab to start monitoring.")
+    
+    with tab2:
+        st.header("💬 Comment Tracker")
+        
+        # Input form
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            # Since we're in Snowflake, we can show current schema
+            table_name = st.text_input("Table Name", 
+                                     placeholder="table_name (or schema.table_name)",
+                                     help="Enter table name. Defaults to current database/schema.")
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                id_column = st.text_input("ID Column", value="id")
+            with col_b:
+                comment_column = st.text_input("Comment Column", value="comments")
+        
+        with col2:
+            st.write("") # spacing
+            st.write("") # spacing
+            if st.button("Track Changes Now", type="primary"):
+                if table_name:
+                    with st.spinner("Tracking changes..."):
+                        changes = st.session_state.snowflake_tracker.track_comment_changes(
+                            table_name, id_column, comment_column
+                        )
+                        if changes:
+                            st.session_state.comment_history.extend(changes)
+                            st.success(f"Found {len(changes)} changes!")
+                        else:
+                            st.info("No changes detected.")
+                else:
+                    st.error("Please enter a table name.")
+        
+        # Display recent changes
+        if st.session_state.comment_history:
+            st.subheader("Recent Changes")
+            df_changes = pd.DataFrame(st.session_state.comment_history[-10:])
+            st.dataframe(df_changes, use_container_width=True)
+            
+            if st.button("Clear Change History"):
+                st.session_state.comment_history = []
+                st.success("Change history cleared!")
+                st.rerun()
+        else:
+            st.info("No changes tracked yet. Enter a table name and click 'Track Changes Now'.")
+    
+    with tab3:
+        st.header("📦 Python Packages")
+        
+        if st.button("Load Python Packages", type="primary"):
+            with st.spinner("Loading Python packages from information_schema..."):
+                df_packages = st.session_state.snowflake_tracker.get_python_packages()
+                if not df_packages.empty:
+                    st.session_state.packages_df = df_packages
+                    st.success(f"Loaded {len(df_packages)} Python packages!")
+                else:
+                    st.warning("No Python packages found in information_schema.packages.")
+        
+        # Display packages data
+        if 'packages_df' in st.session_state and not st.session_state.packages_df.empty:
+            df = st.session_state.packages_df
+            
+            # Summary metrics
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Total Python Packages", len(df))
+            
+            if 'version' in df.columns:
+                col2.metric("Unique Versions", df['version'].nunique())
+            
+            if 'name' in df.columns:
+                col3.metric("Unique Package Names", df['name'].nunique())
+            
+                # Top packages using Streamlit's built-in chart
+                st.subheader("📊 Top 10 Most Common Packages")
+                top_packages = df['name'].value_counts().head(10)
+                st.bar_chart(top_packages)
+            
+            # Data table
+            st.subheader("📋 Package Details")
+            st.dataframe(df, use_container_width=True, height=400)
+        else:
+            st.info("Click 'Load Python Packages' to explore packages available in your Snowflake environment.")
+    
+    with tab4:
+        st.header("🔍 Data Explorer")
+        
+        col1, col2 = st.columns([3, 1])
+        
+        with col1:
+            explore_table = st.text_input("Table to Explore", 
+                                        placeholder="table_name (or database.schema.table_name)")
+            limit = st.number_input("Row Limit", min_value=1, max_value=1000, value=100)
+        
+        with col2:
+            st.write("") # spacing
+            st.write("") # spacing
+            if st.button("Explore Table", type="primary"):
+                if explore_table:
+                    with st.spinner(f"Loading data from {explore_table}..."):
+                        df_explore = st.session_state.snowflake_tracker.get_table_data(explore_table, limit)
+                        if not df_explore.empty:
+                            st.session_state.explore_df = df_explore
+                            st.success(f"Loaded {len(df_explore)} rows from {explore_table}!")
+                        else:
+                            st.error("No data found or table doesn't exist.")
+                else:
+                    st.error("Please enter a table name.")
+        
+        # Display explored data
+        if 'explore_df' in st.session_state and not st.session_state.explore_df.empty:
+            df = st.session_state.explore_df
+            
+            # Data summary
+            st.subheader("📊 Data Summary")
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Rows", len(df))
+            col2.metric("Columns", len(df.columns))
+            col3.metric("Memory Usage", f"{df.memory_usage(deep=True).sum() / 1024:.1f} KB")
+            
+            # Data preview
+            st.subheader("📋 Data Preview")
+            st.dataframe(df, use_container_width=True, height=400)
+            
+            # Column statistics
+            if st.checkbox("Show Column Statistics"):
+                st.subheader("📈 Column Statistics")
+                try:
+                    st.dataframe(df.describe(include='all'), use_container_width=True)
+                except:
+                    st.write("Statistics not available for this dataset")
+        else:
+            st.info("Enter a table name and click 'Explore Table' to browse your data.")
+
+if __name__ == "__main__":
+    main()
