@@ -1,0 +1,360 @@
+import smtplib
+import pandas as pd
+from datetime import datetime
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import hashlib
+import json
+import os
+from sqlalchemy import create_engine
+
+class CommentUpdateMonitor:
+    def __init__(self, db_config, email_config):
+        """
+        Initialize the monitor with database and email configurations
+        
+        Args:
+            db_config: Dictionary with database connection details
+            email_config: Dictionary with email server and recipient details
+        """
+        self.db_config = db_config
+        self.email_config = email_config
+        self.state_file = 'comment_tracker_state.json'
+        
+    def connect_to_database(self):
+        """Create database connection"""
+        # Example for different database types:
+        
+        # PostgreSQL
+        # engine = create_engine(f"postgresql://{self.db_config['user']}:{self.db_config['password']}@{self.db_config['host']}/{self.db_config['database']}")
+        
+        # MySQL
+        # engine = create_engine(f"mysql+pymysql://{self.db_config['user']}:{self.db_config['password']}@{self.db_config['host']}/{self.db_config['database']}")
+        
+        # SQL Server
+        # engine = create_engine(f"mssql+pyodbc://{self.db_config['user']}:{self.db_config['password']}@{self.db_config['server']}/{self.db_config['database']}?driver=ODBC+Driver+17+for+SQL+Server")
+        
+        # SQLite (for testing)
+        engine = create_engine(f"sqlite:///{self.db_config.get('database', 'test.db')}")
+        
+        return engine
+    
+    def load_previous_state(self):
+        """Load the previous state of comments"""
+        if os.path.exists(self.state_file):
+            with open(self.state_file, 'r') as f:
+                return json.load(f)
+        return {}
+    
+    def save_current_state(self, state):
+        """Save the current state of comments"""
+        with open(self.state_file, 'w') as f:
+            json.dump(state, f, default=str)
+    
+    def get_current_data(self):
+        """Fetch current data from the database"""
+        engine = self.connect_to_database()
+        
+        # Modify this query based on your table structure
+        query = """
+        SELECT 
+            id,  -- or whatever your primary key is
+            GENERALCOMMENTS,
+            -- Add other relevant columns you want to track
+            updated_date  -- if you have a timestamp column
+        FROM your_table_name
+        WHERE GENERALCOMMENTS IS NOT NULL
+        """
+        
+        df = pd.read_sql(query, engine)
+        engine.dispose()
+        
+        return df
+    
+    def detect_changes(self, current_df):
+        """Detect changes in comments"""
+        previous_state = self.load_previous_state()
+        changes = {
+            'new': [],
+            'modified': [],
+            'deleted': []
+        }
+        
+        current_state = {}
+        
+        for _, row in current_df.iterrows():
+            record_id = str(row['id'])
+            comment = row['GENERALCOMMENTS']
+            
+            # Create a hash of the comment for comparison
+            comment_hash = hashlib.md5(str(comment).encode()).hexdigest() if comment else None
+            
+            current_state[record_id] = {
+                'comment': comment,
+                'hash': comment_hash,
+                'updated': row.get('updated_date', datetime.now())
+            }
+            
+            # Check if this is a new record or modified
+            if record_id not in previous_state:
+                changes['new'].append({
+                    'id': record_id,
+                    'comment': comment
+                })
+            elif previous_state[record_id]['hash'] != comment_hash:
+                changes['modified'].append({
+                    'id': record_id,
+                    'old_comment': previous_state[record_id]['comment'],
+                    'new_comment': comment
+                })
+        
+        # Check for deleted records
+        for record_id in previous_state:
+            if record_id not in current_state:
+                changes['deleted'].append({
+                    'id': record_id,
+                    'comment': previous_state[record_id]['comment']
+                })
+        
+        return changes, current_state
+    
+    def create_email_body(self, changes):
+        """Create HTML email body with changes"""
+        html = """
+        <html>
+        <head>
+            <style>
+                body { font-family: Arial, sans-serif; }
+                h2 { color: #2e6c80; }
+                .section { margin: 20px 0; }
+                .new { background-color: #d4f1d4; padding: 10px; margin: 5px 0; border-left: 4px solid #28a745; }
+                .modified { background-color: #fff3cd; padding: 10px; margin: 5px 0; border-left: 4px solid #ffc107; }
+                .deleted { background-color: #f8d7da; padding: 10px; margin: 5px 0; border-left: 4px solid #dc3545; }
+                .timestamp { color: #666; font-size: 12px; }
+            </style>
+        </head>
+        <body>
+            <h2>General Comments Update Alert</h2>
+            <p class="timestamp">Generated at: {timestamp}</p>
+        """.format(timestamp=datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        
+        # New comments
+        if changes['new']:
+            html += '<div class="section"><h3>New Comments ({count})</h3>'.format(count=len(changes['new']))
+            for item in changes['new']:
+                html += '<div class="new"><strong>ID: {id}</strong><br>Comment: {comment}</div>'.format(
+                    id=item['id'], 
+                    comment=item['comment']
+                )
+            html += '</div>'
+        
+        # Modified comments
+        if changes['modified']:
+            html += '<div class="section"><h3>Modified Comments ({count})</h3>'.format(count=len(changes['modified']))
+            for item in changes['modified']:
+                html += '''<div class="modified">
+                    <strong>ID: {id}</strong><br>
+                    <strong>Old:</strong> {old}<br>
+                    <strong>New:</strong> {new}
+                </div>'''.format(
+                    id=item['id'],
+                    old=item['old_comment'],
+                    new=item['new_comment']
+                )
+            html += '</div>'
+        
+        # Deleted comments
+        if changes['deleted']:
+            html += '<div class="section"><h3>Deleted Comments ({count})</h3>'.format(count=len(changes['deleted']))
+            for item in changes['deleted']:
+                html += '<div class="deleted"><strong>ID: {id}</strong><br>Comment: {comment}</div>'.format(
+                    id=item['id'],
+                    comment=item['comment']
+                )
+            html += '</div>'
+        
+        html += """
+            <hr>
+            <p style="font-size: 12px; color: #666;">
+                This is an automated email from the Comment Update Monitoring System.
+            </p>
+        </body>
+        </html>
+        """
+        
+        return html
+    
+    def send_email(self, changes):
+        """Send email notification"""
+        if not any([changes['new'], changes['modified'], changes['deleted']]):
+            print("No changes detected. No email sent.")
+            return
+        
+        # Create message
+        msg = MIMEMultipart('alternative')
+        msg['Subject'] = f"Comment Update Alert - {datetime.now().strftime('%Y-%m-%d')}"
+        msg['From'] = self.email_config['sender_email']
+        msg['To'] = ', '.join(self.email_config['recipients'])
+        
+        # Create the HTML part
+        html_body = self.create_email_body(changes)
+        html_part = MIMEText(html_body, 'html')
+        msg.attach(html_part)
+        
+        # Send email
+        try:
+            # Gmail SMTP setup
+            if self.email_config.get('smtp_server') == 'smtp.gmail.com':
+                server = smtplib.SMTP('smtp.gmail.com', 587)
+                server.starttls()
+                server.login(
+                    self.email_config['sender_email'],
+                    self.email_config['sender_password']  # Use app password for Gmail
+                )
+            else:
+                # Generic SMTP setup
+                server = smtplib.SMTP(
+                    self.email_config.get('smtp_server', 'localhost'),
+                    self.email_config.get('smtp_port', 587)
+                )
+                if self.email_config.get('use_tls', True):
+                    server.starttls()
+                if self.email_config.get('sender_password'):
+                    server.login(
+                        self.email_config['sender_email'],
+                        self.email_config['sender_password']
+                    )
+            
+            server.send_message(msg)
+            server.quit()
+            
+            print(f"Email sent successfully to {', '.join(self.email_config['recipients'])}")
+            print(f"Summary: {len(changes['new'])} new, {len(changes['modified'])} modified, {len(changes['deleted'])} deleted")
+            
+        except Exception as e:
+            print(f"Failed to send email: {str(e)}")
+    
+    def run(self):
+        """Main execution method"""
+        try:
+            # Get current data
+            print("Fetching current data from database...")
+            current_df = self.get_current_data()
+            
+            # Detect changes
+            print("Detecting changes...")
+            changes, current_state = self.detect_changes(current_df)
+            
+            # Send email if there are changes
+            self.send_email(changes)
+            
+            # Save current state for next comparison
+            self.save_current_state(current_state)
+            print("State saved for next comparison.")
+            
+        except Exception as e:
+            print(f"Error in monitoring process: {str(e)}")
+            # Optionally send error notification
+            self.send_error_notification(str(e))
+    
+    def send_error_notification(self, error_message):
+        """Send email notification for errors"""
+        msg = MIMEText(f"An error occurred in the Comment Update Monitor:\n\n{error_message}")
+        msg['Subject'] = "Comment Monitor - Error Notification"
+        msg['From'] = self.email_config['sender_email']
+        msg['To'] = self.email_config['recipients'][0]  # Send to first recipient
+        
+        try:
+            server = smtplib.SMTP(self.email_config.get('smtp_server', 'localhost'), 
+                                 self.email_config.get('smtp_port', 587))
+            if self.email_config.get('use_tls', True):
+                server.starttls()
+            if self.email_config.get('sender_password'):
+                server.login(self.email_config['sender_email'], 
+                           self.email_config['sender_password'])
+            server.send_message(msg)
+            server.quit()
+        except:
+            pass  # Silent fail for error notifications
+
+
+# Configuration and usage
+if __name__ == "__main__":
+    
+    # Database configuration
+    db_config = {
+        'host': 'your_host',
+        'database': 'your_database',
+        'user': 'your_username',
+        'password': 'your_password',
+        'port': 5432  # Default PostgreSQL port
+    }
+    
+    # Email configuration
+    email_config = {
+        'smtp_server': 'smtp.gmail.com',  # or your SMTP server
+        'smtp_port': 587,
+        'use_tls': True,
+        'sender_email': 'your_email@gmail.com',
+        'sender_password': 'your_app_password',  # Use app password for Gmail
+        'recipients': [
+            'recipient1@example.com',
+            'recipient2@example.com'
+        ]
+    }
+    
+    # Create and run monitor
+    monitor = CommentUpdateMonitor(db_config, email_config)
+    monitor.run()
+
+
+# ============================================
+# SCHEDULING OPTIONS
+# ============================================
+
+"""
+To automate this script to run daily, you have several options:
+
+1. CRON (Linux/Mac):
+   Add to crontab (crontab -e):
+   0 9 * * * /usr/bin/python3 /path/to/comment_monitor.py
+   
+2. Task Scheduler (Windows):
+   - Open Task Scheduler
+   - Create Basic Task
+   - Set trigger to Daily
+   - Set action to start your Python script
+
+3. Python Scheduler (runs continuously):
+"""
+
+# Option 3: Built-in scheduler using schedule library
+def run_with_scheduler():
+    import schedule
+    import time
+    
+    # Create monitor instance
+    monitor = CommentUpdateMonitor(db_config, email_config)
+    
+    # Schedule daily at 9:00 AM
+    schedule.every().day.at("09:00").do(monitor.run)
+    
+    print("Scheduler started. Monitoring for comment updates...")
+    while True:
+        schedule.run_pending()
+        time.sleep(60)  # Check every minute
+
+# Uncomment to use the scheduler
+# run_with_scheduler()
+
+
+"""
+4. Using Apache Airflow (for enterprise):
+   Create a DAG that runs this script daily
+   
+5. Using AWS Lambda + CloudWatch Events:
+   Deploy as serverless function with daily trigger
+   
+6. Using Azure Functions with Timer Trigger:
+   Deploy to Azure with CRON expression
+"""
