@@ -1,0 +1,123 @@
+Setup Options in Snowflake:
+1. Snowflake Notebooks (Recommended for simplicity)
+
+Create a new Snowflake Notebook
+Copy the SnowflakeCommentMonitor class
+Configure your connection and email settings
+Use Snowflake's built-in notebook scheduling feature to run daily
+
+2. Snowflake Tasks + Stored Procedures
+
+Create a Python stored procedure with the monitoring logic
+Create a Snowflake Task to run the procedure on a schedule
+This runs entirely within Snowflake infrastructure
+
+3. External Python Script
+
+Run the script from your local machine or a server
+Connect to Snowflake using Snowpark
+Use cron/Task Scheduler to run daily
+
+Key Changes from Original:
+
+Uses Snowpark Session instead of SQLAlchemy
+Stores tracking state in a Snowflake table instead of JSON file
+Leverages Snowflake SQL functions for hash comparison and change detection
+Optimized for Snowflake data types and operations
+
+Setup Instructions:
+
+Install required packages:
+
+bash   pip install snowflake-snowpark-python
+
+Update configuration:
+
+Replace connection_parameters with your Snowflake details
+Update source_table with your actual table name
+Configure email settings
+
+
+Column mapping:
+
+Update the SQL query in get_current_data() to match your table structure
+Ensure you have ID, GENERALCOMMENTS, and timestamp columns
+
+
+Test first run:
+
+Run manually to ensure everything works
+Check that the tracking table is created properly
+
+
+
+Scheduling Options:
+
+Snowflake Notebooks: Use the built-in scheduler (easiest)
+Snowflake Tasks: For enterprise automation within Snowflake
+External scheduling: Cron, Windows Task Scheduler, or cloud functions
+
+Would you like me to help you adapt any specific parts for your table structure or set up the scheduling component?
+
+
+
+Setup Options in Snowflake:
+1. Snowflake Notebooks (Recommended for simplicity)
+
+Create a new Snowflake Notebook
+Copy the SnowflakeCommentMonitor class
+Configure your connection and email settings
+Use Snowflake's built-in notebook scheduling feature to run daily
+
+2. Snowflake Tasks + Stored Procedures
+
+Create a Python stored procedure with the monitoring logic
+Create a Snowflake Task to run the procedure on a schedule
+This runs entirely within Snowflake infrastructure
+
+3. External Python Script
+
+Run the script from your local machine or a server
+Connect to Snowflake using Snowpark
+Use cron/Task Scheduler to run daily
+
+Key Changes from Original:
+
+Uses Snowpark Session instead of SQLAlchemy
+Stores tracking state in a Snowflake table instead of JSON file
+Leverages Snowflake SQL functions for hash comparison and change detection
+Optimized for Snowflake data types and operations
+
+Setup Instructions:
+
+Install required packages:
+
+bash   pip install snowflake-snowpark-python
+
+Update configuration:
+
+Replace connection_parameters with your Snowflake details
+Update source_table with your actual table name
+Configure email settings
+
+
+Column mapping:
+
+Update the SQL query in get_current_data() to match your table structure
+Ensure you have ID, GENERALCOMMENTS, and timestamp columns
+
+
+Test first run:
+
+Run manually to ensure everything works
+Check that the tracking table is created properly
+
+
+
+Scheduling Options:
+
+Snowflake Notebooks: Use the built-in scheduler (easiest)
+Snowflake Tasks: For enterprise automation within Snowflake
+External scheduling: Cron, Windows Task Scheduler, or cloud functions
+
+Would you like me to help you adapt any specific parts for your table structure or set up the scheduling component?
