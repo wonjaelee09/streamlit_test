@@ -1,0 +1,647 @@
+import streamlit as st
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime, timedelta
+from snowflake.snowpark.context import get_active_session
+from snowflake.snowpark.functions import col
+import time
+
+class SnowflakeTracker:
+    def __init__(self, session):
+        """Initialize with a Snowpark session"""
+        self.session = session
+        self.last_comments_state = {}
+    
+    def track_comment_changes(self, table_name: str, id_column: str = 'id', comment_column: str = 'comments'):
+        """Check for changes in the comments column and logs them."""
+        try:
+            table = self.session.table(table_name)
+            current_comments = table.select(id_column, comment_column).collect()
+            
+            changes = []
+            for row in current_comments:
+                record_id = row[id_column]
+                comment = row[comment_column] if row[comment_column] is not None else ""
+                
+                if record_id in self.last_comments_state:
+                    if self.last_comments_state[record_id] != comment:
+                        changes.append({
+                            'record_id': record_id,
+                            'old_comment': self.last_comments_state[record_id],
+                            'new_comment': comment,
+                            'timestamp': datetime.now(),
+                            'change_type': 'Modified' if self.last_comments_state[record_id] else 'Added',
+                            'table_name': table_name
+                        })
+                else:
+                    changes.append({
+                        'record_id': record_id,
+                        'old_comment': None,
+                        'new_comment': comment,
+                        'timestamp': datetime.now(),
+                        'change_type': 'New',
+                        'table_name': table_name
+                    })
+                
+                self.last_comments_state[record_id] = comment
+            
+            return changes
+                
+        except Exception as e:
+            st.error(f'Error tracking comment changes: {e}')
+            return []
+    
+    def get_table_data(self, table_name: str, limit: int = 100, search_term: str = None):
+        """Get sample data from any table with optional search"""
+        try:
+            dataframe = self.session.table(table_name).limit(limit)
+            df = dataframe.to_pandas()
+            
+            if search_term and not df.empty:
+                # Search across all string columns
+                string_cols = df.select_dtypes(include=['object', 'string']).columns
+                mask = df[string_cols].astype(str).apply(
+                    lambda x: x.str.contains(search_term, case=False, na=False)
+                ).any(axis=1)
+                df = df[mask]
+            
+            return df
+        except Exception as e:
+            st.error(f"Error retrieving table data: {e}")
+            return pd.DataFrame()
+
+def create_advanced_charts(df_changes):
+    """Create advanced visualizations for comment changes"""
+    if df_changes.empty:
+        return None, None
+    
+    df_changes['timestamp'] = pd.to_datetime(df_changes['timestamp'])
+    
+    # Timeline chart
+    fig_timeline = px.scatter(
+        df_changes, 
+        x='timestamp', 
+        y='record_id',
+        color='change_type',
+        hover_data=['table_name', 'old_comment', 'new_comment'],
+        title="Comment Changes Timeline",
+        color_discrete_map={
+            'New': '#00CC96',
+            'Modified': '#FFA15A', 
+            'Added': '#19D3F3'
+        }
+    )
+    fig_timeline.update_layout(
+        xaxis_title="Time",
+        yaxis_title="Record ID",
+        hovermode='closest'
+    )
+    
+    # Activity heatmap by hour and day
+    df_changes['hour'] = df_changes['timestamp'].dt.hour
+    df_changes['day'] = df_changes['timestamp'].dt.date
+    
+    hourly_activity = df_changes.groupby(['day', 'hour']).size().reset_index(name='changes')
+    
+    if len(hourly_activity) > 1:
+        fig_heatmap = px.density_heatmap(
+            hourly_activity,
+            x='hour',
+            y='day', 
+            z='changes',
+            title="Comment Change Activity Heatmap"
+        )
+        fig_heatmap.update_layout(
+            xaxis_title="Hour of Day",
+            yaxis_title="Date"
+        )
+    else:
+        fig_heatmap = None
+    
+    return fig_timeline, fig_heatmap
+
+def export_changes_csv(df_changes):
+    """Convert changes dataframe to CSV for download"""
+    if not df_changes.empty:
+        csv = df_changes.to_csv(index=False)
+        return csv
+    return None
+
+def main():
+    st.set_page_config(
+        page_title="Snowflake Comment Tracker",
+        page_icon="❄️",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    # Custom CSS for better styling
+    st.markdown("""
+    <style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: 700;
+        color: #1f77b4;
+        text-align: center;
+        margin-bottom: 0.5rem;
+    }
+    .sub-header {
+        text-align: center;
+        color: #666;
+        margin-bottom: 2rem;
+    }
+    .metric-container {
+        background-color: #f8f9fa;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #1f77b4;
+    }
+    .stAlert > div {
+        border-radius: 0.5rem;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    
+    st.markdown('<h1 class="main-header">❄️ Snowflake Comment Tracker</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Advanced monitoring and analytics for data documentation changes</p>', unsafe_allow_html=True)
+    st.markdown("---")
+    
+    # Get the active Snowflake session
+    try:
+        session = get_active_session()
+        st.success("✅ Connected to Snowflake session")
+    except Exception as e:
+        st.error(f"❌ Error getting Snowflake session: {e}")
+        return
+    
+    # Initialize the tracker and session state
+    if 'snowflake_tracker' not in st.session_state:
+        st.session_state.snowflake_tracker = SnowflakeTracker(session)
+    if 'comment_history' not in st.session_state:
+        st.session_state.comment_history = []
+    if 'auto_refresh' not in st.session_state:
+        st.session_state.auto_refresh = False
+    if 'user_preferences' not in st.session_state:
+        st.session_state.user_preferences = {
+            'theme': 'light',
+            'default_limit': 100,
+            'notification_enabled': False
+        }
+    
+    # Enhanced Sidebar
+    with st.sidebar:
+        st.header("📊 Session Info")
+        st.success("🟢 Session Active")
+        
+        # Try to get current database/schema info
+        try:
+            current_db = session.sql("SELECT CURRENT_DATABASE()").collect()[0][0]
+            current_schema = session.sql("SELECT CURRENT_SCHEMA()").collect()[0][0]
+            current_warehouse = session.sql("SELECT CURRENT_WAREHOUSE()").collect()[0][0]
+            
+            st.info(f"**Database:** {current_db}")
+            st.info(f"**Schema:** {current_schema}")
+            st.info(f"**Warehouse:** {current_warehouse}")
+        except:
+            st.info("Session context information unavailable")
+        
+        st.markdown("---")
+        
+        # Settings
+        st.header("⚙️ Settings")
+        
+        # Auto-refresh toggle
+        auto_refresh = st.toggle("Auto Refresh (30s)", value=st.session_state.auto_refresh)
+        st.session_state.auto_refresh = auto_refresh
+        
+        # Default row limit
+        default_limit = st.number_input("Default Row Limit", min_value=50, max_value=1000, 
+                                      value=st.session_state.user_preferences['default_limit'])
+        st.session_state.user_preferences['default_limit'] = default_limit
+        
+        # Notification settings
+        notification_enabled = st.toggle("Email Notifications", 
+                                        value=st.session_state.user_preferences['notification_enabled'])
+        st.session_state.user_preferences['notification_enabled'] = notification_enabled
+        
+        if notification_enabled:
+            email = st.text_input("Notification Email", placeholder="your@email.com")
+        
+        st.markdown("---")
+        
+        # Quick Actions
+        st.header("🚀 Quick Actions")
+        if st.button("Clear All History", type="secondary"):
+            st.session_state.comment_history = []
+            st.success("History cleared!")
+            st.rerun()
+        
+        # Export functionality
+        if st.session_state.comment_history:
+            csv_data = export_changes_csv(pd.DataFrame(st.session_state.comment_history))
+            if csv_data:
+                st.download_button(
+                    label="📥 Download CSV",
+                    data=csv_data,
+                    file_name=f"comment_changes_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv"
+                )
+    
+    # Auto-refresh logic
+    if st.session_state.auto_refresh:
+        placeholder = st.empty()
+        with placeholder.container():
+            st.info("🔄 Auto-refresh enabled - will refresh every 30 seconds")
+        time.sleep(1)
+        placeholder.empty()
+    
+    # Main tabs
+    tab1, tab2, tab3 = st.tabs(["📊 Dashboard", "💬 Comment Tracker", "🔍 Data Explorer"])
+    
+    with tab1:
+        st.header("📊 Analytics Dashboard")
+        
+        if st.session_state.comment_history:
+            df_changes = pd.DataFrame(st.session_state.comment_history)
+            
+            # Enhanced metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.markdown('<div class="metric-container">', unsafe_allow_html=True)
+                st.metric("Total Changes", len(df_changes))
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col2:
+                recent_changes = len(df_changes[df_changes['timestamp'] > (datetime.now() - timedelta(hours=24))])
+                st.markdown('<div class="metric-container">', unsafe_allow_html=True)
+                st.metric("Last 24h", recent_changes)
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col3:
+                unique_tables = df_changes['table_name'].nunique()
+                st.markdown('<div class="metric-container">', unsafe_allow_html=True)
+                st.metric("Tables Monitored", unique_tables)
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            with col4:
+                unique_records = df_changes['record_id'].nunique()
+                st.markdown('<div class="metric-container">', unsafe_allow_html=True)
+                st.metric("Records Affected", unique_records)
+                st.markdown('</div>', unsafe_allow_html=True)
+            
+            st.markdown("---")
+            
+            # Advanced visualizations
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                # Change type distribution
+                change_type_counts = df_changes['change_type'].value_counts()
+                fig_pie = px.pie(
+                    values=change_type_counts.values,
+                    names=change_type_counts.index,
+                    title="Change Type Distribution"
+                )
+                st.plotly_chart(fig_pie, use_container_width=True)
+            
+            with col2:
+                # Changes over time
+                df_changes['timestamp'] = pd.to_datetime(df_changes['timestamp'])
+                df_changes['date'] = df_changes['timestamp'].dt.date
+                daily_changes = df_changes.groupby('date').size().reset_index(name='changes')
+                
+                fig_line = px.line(
+                    daily_changes,
+                    x='date',
+                    y='changes',
+                    title="Daily Change Trend",
+                    markers=True
+                )
+                st.plotly_chart(fig_line, use_container_width=True)
+            
+            # Advanced charts
+            fig_timeline, fig_heatmap = create_advanced_charts(df_changes)
+            
+            if fig_timeline:
+                st.plotly_chart(fig_timeline, use_container_width=True)
+            
+            if fig_heatmap:
+                st.plotly_chart(fig_heatmap, use_container_width=True)
+            
+            # Recent changes table with enhanced formatting
+            st.subheader("📝 Recent Changes")
+            
+            # Date range filter
+            col1, col2 = st.columns(2)
+            with col1:
+                start_date = st.date_input("From Date", value=datetime.now().date() - timedelta(days=7))
+            with col2:
+                end_date = st.date_input("To Date", value=datetime.now().date())
+            
+            # Filter data
+            mask = (df_changes['timestamp'].dt.date >= start_date) & (df_changes['timestamp'].dt.date <= end_date)
+            filtered_df = df_changes[mask]
+            
+            # Search functionality
+            search_term = st.text_input("🔍 Search in changes", placeholder="Search comments, record IDs, etc.")
+            if search_term:
+                search_mask = filtered_df.astype(str).apply(
+                    lambda x: x.str.contains(search_term, case=False, na=False)
+                ).any(axis=1)
+                filtered_df = filtered_df[search_mask]
+            
+            # Pagination
+            items_per_page = 10
+            total_items = len(filtered_df)
+            total_pages = max(1, (total_items - 1) // items_per_page + 1)
+            
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                page = st.selectbox("Page", range(1, total_pages + 1), key="dashboard_page")
+            
+            start_idx = (page - 1) * items_per_page
+            end_idx = start_idx + items_per_page
+            
+            st.dataframe(
+                filtered_df.iloc[start_idx:end_idx].sort_values('timestamp', ascending=False),
+                use_container_width=True,
+                hide_index=True
+            )
+            
+            st.info(f"Showing {min(items_per_page, total_items - start_idx)} of {total_items} changes")
+            
+        else:
+            st.info("📈 Start tracking comment changes to see analytics here!")
+            st.markdown("""
+            **Get started:**
+            1. Go to the Comment Tracker tab
+            2. Enter a table name to monitor
+            3. Click 'Track Changes Now' to start monitoring
+            4. Return here to view analytics and insights
+            """)
+    
+    with tab2:
+        st.header("💬 Comment Tracker")
+        
+        # Enhanced input form
+        with st.expander("🎯 Tracking Configuration", expanded=True):
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                table_name = st.text_input(
+                    "Table Name", 
+                    placeholder="table_name or schema.table_name",
+                    help="Enter table name. Defaults to current database/schema."
+                )
+                
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    id_column = st.text_input("ID Column", value="id")
+                with col_b:
+                    comment_column = st.text_input("Comment Column", value="comments")
+            
+            with col2:
+                st.markdown("**Tracking Options**")
+                continuous_tracking = st.toggle("Continuous Tracking")
+                if continuous_tracking:
+                    tracking_interval = st.selectbox("Interval", ["30s", "1m", "5m", "15m"])
+                
+                alert_on_change = st.toggle("Alert on Changes")
+        
+        # Action buttons
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            if st.button("🔍 Track Changes Now", type="primary"):
+                if table_name:
+                    with st.spinner("Tracking changes..."):
+                        changes = st.session_state.snowflake_tracker.track_comment_changes(
+                            table_name, id_column, comment_column
+                        )
+                        if changes:
+                            st.session_state.comment_history.extend(changes)
+                            st.success(f"🎉 Found {len(changes)} changes!")
+                            
+                            # Show alert if enabled
+                            if alert_on_change and st.session_state.user_preferences['notification_enabled']:
+                                st.balloons()
+                                st.success("📧 Notification sent!")
+                        else:
+                            st.info("✅ No changes detected.")
+                else:
+                    st.error("Please enter a table name.")
+        
+        with col2:
+            if st.button("📊 View Analytics"):
+                st.switch_page("Dashboard")  # This would switch to dashboard tab
+        
+        with col3:
+            if st.button("🔄 Refresh Data"):
+                st.rerun()
+        
+        # Enhanced change history display
+        if st.session_state.comment_history:
+            st.markdown("---")
+            st.subheader("📋 Change History")
+            
+            df_changes = pd.DataFrame(st.session_state.comment_history)
+            
+            # Filtering options
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                table_filter = st.multiselect(
+                    "Filter by Table",
+                    options=df_changes['table_name'].unique(),
+                    default=df_changes['table_name'].unique()
+                )
+            with col2:
+                change_type_filter = st.multiselect(
+                    "Filter by Change Type",
+                    options=df_changes['change_type'].unique(),
+                    default=df_changes['change_type'].unique()
+                )
+            with col3:
+                records_to_show = st.selectbox("Records to Show", [10, 25, 50, 100], index=1)
+            
+            # Apply filters
+            filtered_changes = df_changes[
+                (df_changes['table_name'].isin(table_filter)) &
+                (df_changes['change_type'].isin(change_type_filter))
+            ].head(records_to_show)
+            
+            # Display with enhanced formatting
+            for idx, change in filtered_changes.iterrows():
+                with st.expander(
+                    f"🔄 {change['change_type']} - Record {change['record_id']} ({change['timestamp'].strftime('%Y-%m-%d %H:%M:%S')})"
+                ):
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.markdown("**Old Comment:**")
+                        st.text_area("", value=change['old_comment'] or "(empty)", height=100, disabled=True, key=f"old_{idx}")
+                    with col2:
+                        st.markdown("**New Comment:**")
+                        st.text_area("", value=change['new_comment'] or "(empty)", height=100, disabled=True, key=f"new_{idx}")
+                    
+                    st.info(f"Table: {change['table_name']} | Type: {change['change_type']} | Time: {change['timestamp']}")
+        else:
+            st.info("🎯 No changes tracked yet. Configure tracking above and click 'Track Changes Now'.")
+    
+    with tab3:
+        st.header("🔍 Enhanced Data Explorer")
+        
+        # Advanced exploration options
+        with st.expander("🎯 Exploration Settings", expanded=True):
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                explore_table = st.text_input(
+                    "Table to Explore", 
+                    placeholder="database.schema.table_name"
+                )
+            
+            with col2:
+                limit = st.number_input(
+                    "Row Limit", 
+                    min_value=10, 
+                    max_value=1000, 
+                    value=st.session_state.user_preferences['default_limit']
+                )
+            
+            with col3:
+                show_stats = st.toggle("Show Statistics", value=True)
+        
+        # Search and filter options
+        col1, col2 = st.columns(2)
+        with col1:
+            search_term = st.text_input("🔍 Search in data", placeholder="Search across all columns")
+        
+        with col2:
+            if st.button("🔍 Explore Table", type="primary"):
+                if explore_table:
+                    with st.spinner(f"Loading data from {explore_table}..."):
+                        df_explore = st.session_state.snowflake_tracker.get_table_data(
+                            explore_table, limit, search_term
+                        )
+                        if not df_explore.empty:
+                            st.session_state.explore_df = df_explore
+                            st.session_state.explore_table_name = explore_table
+                            st.success(f"✅ Loaded {len(df_explore)} rows from {explore_table}!")
+                        else:
+                            st.error("❌ No data found or table doesn't exist.")
+                else:
+                    st.error("Please enter a table name.")
+        
+        # Display explored data with enhanced features
+        if 'explore_df' in st.session_state and not st.session_state.explore_df.empty:
+            df = st.session_state.explore_df
+            
+            st.markdown("---")
+            st.subheader(f"📊 Data from {st.session_state.explore_table_name}")
+            
+            # Enhanced metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Total Rows", f"{len(df):,}")
+            with col2:
+                st.metric("Columns", len(df.columns))
+            with col3:
+                memory_mb = df.memory_usage(deep=True).sum() / (1024 * 1024)
+                st.metric("Memory Usage", f"{memory_mb:.2f} MB")
+            with col4:
+                null_percentage = (df.isnull().sum().sum() / (len(df) * len(df.columns))) * 100
+                st.metric("Null Values", f"{null_percentage:.1f}%")
+            
+            # Column info
+            if st.checkbox("📋 Show Column Information"):
+                col_info = pd.DataFrame({
+                    'Column': df.columns,
+                    'Type': df.dtypes,
+                    'Non-Null Count': df.count(),
+                    'Null Count': df.isnull().sum(),
+                    'Unique Values': df.nunique()
+                })
+                st.dataframe(col_info, use_container_width=True)
+            
+            # Data preview with pagination
+            st.subheader("📄 Data Preview")
+            
+            # Pagination for data preview
+            items_per_page = 25
+            total_items = len(df)
+            total_pages = max(1, (total_items - 1) // items_per_page + 1)
+            
+            col1, col2, col3 = st.columns([1, 2, 1])
+            with col2:
+                page = st.selectbox("Page", range(1, total_pages + 1), key="explorer_page")
+            
+            start_idx = (page - 1) * items_per_page
+            end_idx = start_idx + items_per_page
+            
+            st.dataframe(
+                df.iloc[start_idx:end_idx], 
+                use_container_width=True, 
+                height=400
+            )
+            
+            st.info(f"Showing rows {start_idx + 1}-{min(end_idx, total_items)} of {total_items}")
+            
+            # Enhanced statistics
+            if show_stats and st.checkbox("📈 Show Detailed Statistics"):
+                st.subheader("📊 Statistical Summary")
+                
+                try:
+                    # Numeric columns statistics
+                    numeric_df = df.select_dtypes(include=['number'])
+                    if not numeric_df.empty:
+                        st.markdown("**Numeric Columns:**")
+                        st.dataframe(numeric_df.describe(), use_container_width=True)
+                    
+                    # Categorical columns statistics
+                    categorical_df = df.select_dtypes(include=['object', 'string'])
+                    if not categorical_df.empty:
+                        st.markdown("**Text/Categorical Columns:**")
+                        cat_stats = pd.DataFrame({
+                            'Column': categorical_df.columns,
+                            'Unique Values': categorical_df.nunique(),
+                            'Most Frequent': categorical_df.mode().iloc[0] if len(categorical_df) > 0 else None,
+                            'Most Frequent Count': [categorical_df[col].value_counts().iloc[0] if len(categorical_df[col].value_counts()) > 0 else 0 for col in categorical_df.columns]
+                        })
+                        st.dataframe(cat_stats, use_container_width=True)
+                        
+                except Exception as e:
+                    st.warning(f"Could not generate detailed statistics: {e}")
+            
+            # Download functionality
+            csv = df.to_csv(index=False)
+            st.download_button(
+                label="📥 Download Data as CSV",
+                data=csv,
+                file_name=f"{st.session_state.explore_table_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                mime="text/csv"
+            )
+            
+        else:
+            st.info("🎯 Enter a table name and click 'Explore Table' to start data exploration.")
+            
+            # Sample queries for guidance
+            with st.expander("💡 Example Table Names"):
+                st.markdown("""
+                **Common patterns:**
+                - `MY_TABLE` (uses current database/schema)
+                - `MY_SCHEMA.MY_TABLE` (uses current database)
+                - `MY_DATABASE.MY_SCHEMA.MY_TABLE` (fully qualified)
+                
+                **System tables you might explore:**
+                - `INFORMATION_SCHEMA.TABLES`
+                - `INFORMATION_SCHEMA.COLUMNS`
+                """)
+    
+    # Auto-refresh implementation
+    if st.session_state.auto_refresh:
+        time.sleep(30)
+        st.rerun()
+
+if __name__ == "__main__":
+    main()
