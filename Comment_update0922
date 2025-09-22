@@ -1,7 +1,5 @@
 import streamlit as st
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from snowflake.snowpark.context import get_active_session
 from snowflake.snowpark.functions import col
@@ -71,55 +69,18 @@ class SnowflakeTracker:
             st.error(f"Error retrieving table data: {e}")
             return pd.DataFrame()
 
-def create_advanced_charts(df_changes):
-    """Create advanced visualizations for comment changes"""
+def create_streamlit_charts(df_changes):
+    """Create visualizations using Streamlit's built-in charting"""
     if df_changes.empty:
-        return None, None
+        return None
     
     df_changes['timestamp'] = pd.to_datetime(df_changes['timestamp'])
     
-    # Timeline chart
-    fig_timeline = px.scatter(
-        df_changes, 
-        x='timestamp', 
-        y='record_id',
-        color='change_type',
-        hover_data=['table_name', 'old_comment', 'new_comment'],
-        title="Comment Changes Timeline",
-        color_discrete_map={
-            'New': '#00CC96',
-            'Modified': '#FFA15A', 
-            'Added': '#19D3F3'
-        }
-    )
-    fig_timeline.update_layout(
-        xaxis_title="Time",
-        yaxis_title="Record ID",
-        hovermode='closest'
-    )
-    
-    # Activity heatmap by hour and day
+    # Prepare data for timeline chart (simplified)
+    df_changes['date'] = df_changes['timestamp'].dt.date
     df_changes['hour'] = df_changes['timestamp'].dt.hour
-    df_changes['day'] = df_changes['timestamp'].dt.date
     
-    hourly_activity = df_changes.groupby(['day', 'hour']).size().reset_index(name='changes')
-    
-    if len(hourly_activity) > 1:
-        fig_heatmap = px.density_heatmap(
-            hourly_activity,
-            x='hour',
-            y='day', 
-            z='changes',
-            title="Comment Change Activity Heatmap"
-        )
-        fig_heatmap.update_layout(
-            xaxis_title="Hour of Day",
-            yaxis_title="Date"
-        )
-    else:
-        fig_heatmap = None
-    
-    return fig_timeline, fig_heatmap
+    return df_changes
 
 def export_changes_csv(df_changes):
     """Convert changes dataframe to CSV for download"""
@@ -293,42 +254,33 @@ def main():
             
             st.markdown("---")
             
-            # Advanced visualizations
+            # Streamlit built-in visualizations
             col1, col2 = st.columns(2)
             
             with col1:
-                # Change type distribution
+                # Change type distribution using bar chart
+                st.subheader("Change Type Distribution")
                 change_type_counts = df_changes['change_type'].value_counts()
-                fig_pie = px.pie(
-                    values=change_type_counts.values,
-                    names=change_type_counts.index,
-                    title="Change Type Distribution"
-                )
-                st.plotly_chart(fig_pie, use_container_width=True)
+                st.bar_chart(change_type_counts)
             
             with col2:
-                # Changes over time
+                # Changes over time using line chart
+                st.subheader("Daily Change Trend")
                 df_changes['timestamp'] = pd.to_datetime(df_changes['timestamp'])
                 df_changes['date'] = df_changes['timestamp'].dt.date
-                daily_changes = df_changes.groupby('date').size().reset_index(name='changes')
-                
-                fig_line = px.line(
-                    daily_changes,
-                    x='date',
-                    y='changes',
-                    title="Daily Change Trend",
-                    markers=True
-                )
-                st.plotly_chart(fig_line, use_container_width=True)
+                daily_changes = df_changes.groupby('date').size()
+                st.line_chart(daily_changes)
             
-            # Advanced charts
-            fig_timeline, fig_heatmap = create_advanced_charts(df_changes)
+            # Activity by hour of day
+            st.subheader("📊 Activity by Hour of Day")
+            hourly_activity = df_changes.groupby(df_changes['timestamp'].dt.hour).size()
+            st.bar_chart(hourly_activity)
             
-            if fig_timeline:
-                st.plotly_chart(fig_timeline, use_container_width=True)
-            
-            if fig_heatmap:
-                st.plotly_chart(fig_heatmap, use_container_width=True)
+            # Table activity breakdown
+            if df_changes['table_name'].nunique() > 1:
+                st.subheader("📊 Changes by Table")
+                table_changes = df_changes['table_name'].value_counts()
+                st.bar_chart(table_changes)
             
             # Recent changes table with enhanced formatting
             st.subheader("📝 Recent Changes")
